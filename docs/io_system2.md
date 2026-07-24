@@ -220,9 +220,13 @@ def parse_actions(self, output):
 
 1. **Đảo toạ độ:** `pixel_goal = [coord[1], coord[0]]`. VLM nói theo `(x, y)` = `(cột, hàng)`, code lưu
    thành `[hàng, cột]` (= `[v, u]`, thuận index numpy `img[row, col]`). ⚠️ Nhưng `data_contract.md` 4.b
-   đo cột `goal.{setting}` là **`[u, v]`** (pixel `[cột, hàng]`). → **Có khả năng lệch quy ước giữa data
-   train (`[u,v]`) và output runtime (`[v,u]`)** — cần đối chiếu kỹ ở Khối 2 khi có output thật, đây là
-   ứng viên bug/PR mạnh.
+   đo cột `goal.{setting}` là **`[u, v]`** (pixel `[cột, hàng]`).
+   ✅ **ĐÃ ĐỐI CHIẾU 23/07/2026 với 98 frame output thật** (PL-E3 trong `handbook/05_appendix.md`,
+   checkpoint `-w-NavDP`): VLM nhả `"u v"` trong **không gian 640×480 gốc** — bằng chứng: 20 frame có
+   toạ độ vượt 384 (max 563), không thể là không gian 384×384 dù ảnh input bị resize 384. Tức **cùng
+   hệ toạ độ với GT**, không lệch quy ước — khi so sánh chỉ cần đảo lại thứ tự (`u=coord[0],
+   v=coord[1]`), **KHÔNG scale 384→640** (scale nhầm sẽ thổi L2 từ 41.8 lên 206 px). Kết quả đo:
+   median lệch GT chỉ **20 px**.
 2. **Parser cực lỏng:** chỉ cần text **có bất kỳ chữ số nào** là coi là pixel goal, rồi lấy **2 số đầu
    tiên** bất kể ngữ cảnh. Nếu VLM viết "*turn 90 degrees*" → "90" bị hiểu nhầm thành toạ độ. Không có
    validation format `(x, y)`.

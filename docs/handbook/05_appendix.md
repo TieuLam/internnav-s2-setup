@@ -392,6 +392,52 @@ elif policy_name == 'InternVLAN1_Policy':
 → Trả lời câu hỏi mở trong `eval_plan_kaggle_s2.md` §8 ("tên policy đúng cho NavDP là gì").
 Cùng file có `get_config('InternVLAN1_Policy')` → `InternVLAN1ModelConfig` (dòng 50–56).
 
+### PL-C7 ✅📖 Dựng NavDP đòi file hardcode `checkpoints/depth_anything_v2_vits.pth` (gặp thật trên Kaggle 23/07/2026)
+
+**Triệu chứng thật** (khi chạy Phase D của `06_eval_plan_w_navdp_kaggle.md` — dựng policy với
+checkpoint `-w-NavDP`):
+
+```
+FileNotFoundError: [Errno 2] No such file or directory: 'checkpoints/depth_anything_v2_vits.pth'
+```
+
+**Nguyên nhân — truy ra tận dòng code:** chuỗi dựng kiến trúc
+`from_pretrained → InternVLAN1MetaModel.__init__ → build_navdp → NavDP_Policy_DPT_CriticSum_DAT.__init__`
+tạo encoder tại `internnav/model/basemodel/internvla_n1/navdp.py:53–55` **không truyền** tham số
+`checkpoint`, nên rơi vào default hardcode ở
+`internnav/model/encoder/navdp_backbone.py:109` (và bản sao thứ hai ở `:212`):
+
+```python
+checkpoint="checkpoints/depth_anything_v2_vits.pth",   # duong dan TUONG DOI theo CWD
+...
+self.rgb_model.load_state_dict(torch.load(checkpoint), strict=False)   # :124 — load NGAY khi dung
+```
+
+**Ba kết luận:**
+
+1. File chỉ là **dependency lúc-dựng**: sau khi module dựng xong, `from_pretrained` ghi đè toàn bộ
+   `navdp.rgbd_encoder.rgb_model.*` bằng weights trong checkpoint 16.78GB (nhóm tensor này nằm trong
+   danh sách đo được ở PL-B3) → giá trị trong file .pth **không ảnh hưởng kết quả**.
+2. Fix: tải `depth_anything_v2_vits.pth` (~99 MB) từ HF repo chính chủ
+   `depth-anything/Depth-Anything-V2-Small` (đã xác minh 23/07: public, apache-2.0, có đúng tên file)
+   vào `<CWD>/checkpoints/`, và **chốt CWD = `/kaggle/working`** vì đường dẫn là tương đối.
+3. File họ hàng `depth_anything_v2_metric_hypersim_vits.pth` (`internvla_n1_arch.py:36`,
+   trong `build_depthanythingv2`) chỉ dùng cho nhánh `nextdit_async` (DualVLN) — **không cần** cho
+   nhánh `navdp_async`.
+
+**Hệ quả phụ — cũng gặp thật (23/07/2026):** sau khi có file, lúc load D3 in hàng loạt
+`UserWarning: for pretrained.cls_token: copying from a non-meta parameter in the checkpoint to a
+meta parameter in the current model, which is a no-op...` (mỗi tham số DA ViT-S một dòng).
+Cơ chế: `device_map="auto"` dựng kiến trúc trên **meta device** (chưa cấp phát bộ nhớ), mà
+`load_state_dict` ở `navdp_backbone.py:124` chạy ngay trong lúc dựng → copy vào tensor meta = no-op.
+**Vô hại** vì weights DA đằng nào cũng bị 4 shard checkpoint ghi đè (kết luận 1 ở trên); nhưng chỉ
+được phép kết luận vô hại sau khi kiểm **không còn tham số meta sót lại** sau load
+(`[n for n,p in model.named_parameters() if p.is_meta] == []` — đã đưa vào GATE 1 (1b) của file 06).
+Không dùng `assign=True` theo gợi ý của warning — vô nghĩa với weights sắp bị ghi đè.
+
+🔧 **PR candidate:** đường dẫn backbone hardcode tương đối theo CWD, không có trong config và không
+được README nhắc tới ở luồng inference — ai load `-w-NavDP`/DualVLN ngoài thư mục gốc repo đều dính.
+
 ---
 
 ## Nhóm D — Dữ liệu `InternRobotics/InternData-N1`
@@ -506,6 +552,73 @@ conjunction) trước khi kết luận.
 
 > Nguồn: `docs/io_system2.md` mục 4.a.
 
+### PL-E2 ✅ GATE 1 PASS — lần đầu load đủ full dual-system `-w-NavDP` trên Kaggle T4×2 (23/07/2026)
+
+**Setup:** Kaggle T4×2 · `transformers==4.51.0` · `torch 2.10.0+cu128` · patch `sdpa` +
+`device_map="auto"` (bước C4 file 06) · file DepthAnything tại `checkpoints/` (PL-C7) ·
+checkpoint `InternVLA-N1-w-NavDP` · load qua `InternVLAN1Net` (policy repo).
+
+**Số đo thật (output GATE 1, Phase D4 của file 06):**
+
+| Phép kiểm | Kết quả |
+|---|---|
+| navdp params | **98.8M** (≈0.198 GB bf16) |
+| meta còn sót sau load | **0** |
+| navdp sample weight | cuda:1, bf16, `abs().mean()` = 0.00763 (weights thực) |
+| `latent_queries` | (1, **4**, 3584) — khớp `n_query=4` (PL-B6) |
+| tokenizer | `is_fast=True`, encode OK — convert slow→fast **thành công** trên 4.51.0 |
+| device map | `visual`+`layers 0–10` → GPU0 · `layers 11–27`+`norm`+**`navdp`**+`lm_head` → GPU1 |
+| VRAM sau load | GPU0 7.57 GB · GPU1 9.21 GB (tổng 16.78 GB) |
+
+**Sáu kết luận:**
+
+1. **Lần đầu xác nhận runtime** cơ chế PL-C2: config có `system1: "navdp_async"` → S1 dựng + nạp đủ,
+   không cần patch gì (khác hẳn bản wo-dagger thiếu field).
+2. **Khép kín suy luận PL-B1:** 98.8M × 2 byte ≈ 0.198 GB — khớp chênh lệch shard-4 (+0.196 GB) đo
+   21/07. "0.2GB = System 1" từ suy luận dung lượng nay thành số đo trực tiếp.
+3. **R1 (file 06) ĐÓNG:** không có `tokenizer.json` nhưng transformers 4.51.0 convert slow→fast ổn
+   → fallback chép tokenizer từ mirror wo-dagger **không cần dùng**.
+4. **R2 ĐÓNG:** `ModelCfg` (pydantic v2) nhận dict `model_settings` ở D1 (có `policy_name` +
+   `state_encoder=None`).
+5. **R3 nhiều khả năng không xảy ra:** `model.navdp` nằm trọn GPU1 — cùng GPU với layer cuối LLM
+   (nơi sinh latent) → latent và navdp chung device. Giữ dòng `.to(navdp_dev)` làm dây an toàn.
+6. So với S2-only (PL-B3: GPU1 = 9.01 GB): GPU1 giờ 9.21 GB — chênh đúng phần navdp. Headroom
+   GPU1 ≈ 5.8 GB cho KV-cache khi generate.
+
+→ GATE 2/3 + metric đầy đủ của phiên chạy: **PL-E3** ngay dưới.
+
+### PL-E3 ✅ GATE 2+3 PASS + metric open-loop đầu tiên — 3 episode `vln_ce` trên `-w-NavDP` (23/07/2026)
+
+**Setup:** tiếp nối PL-E2 (cùng session T4×2, `num_history=4` sau fix OOM) · scene đầu của sample
+`vln-ce-eval-sample`, setting `60cm_30deg` · 3 episode = **128 frame** · vòng lặp G1 có look-down
+2 nhịp + `s1_step_full` (file 06 Phase E–G). File kết quả: `docs/handbook/results.json` —
+**schema + cách đọc từng field: file 06 mục G1.b**.
+
+**Số đo hành vi S2:**
+
+| Chỉ số | Giá trị |
+|---|---|
+| Frame ra pixel+latent | **101/128 (79%)** — toàn bộ đều qua nhịp look-down (`↓` rồi toạ độ) |
+| Frame ra action điều hướng | 27 (`←`/`→` cụm 1–3 mũi tên) + STOP tự phát cuối ep0 (fr 45–46) |
+| Thời gian S2 | **mean 35.5 s/frame** (5.1–44.0) — gồm ~2 lần generate/frame; cả run ≈75 phút |
+
+**Metric G2 (công thức ĐÃ hiệu chỉnh — xem "bài học toạ độ" dưới):**
+
+| Metric | Giá trị | Ghi chú |
+|---|---|---|
+| Pixel-goal L2 | **mean 41.8 px · median 20.0 px** (n=98) | trên ảnh 640×480; 12 outlier >100px — 3 cái là frame 0–2 ep0 (chưa có history), vài frame lặp giá trị `(318,410)` đáng soi ở G3 |
+| Action accuracy | 37.04% (n=27) | confusion: đúng 10 (9 quay trái + 1 quay phải); **(GT=tiến, pred=STOP) ×10 — cả 10 dồn sát cuối episode** (fr 44–45/46, 50–53/54, 20–27/28) = model muốn dừng sớm hơn GT vài frame, không phải đi lạc; chỉ 7 lỗi điều hướng thật giữa episode |
+
+**Số đo S1 (qua `s1_step_full`):** `s1_actions` hợp lệ ∈ {1,2,3} trên toàn bộ 101 frame latent;
+`s1_traj` shape **(33, 2)** không NaN → **`predict_size = 32` đo runtime** (không phải 24 như
+default signature — khớp `predict_step_nums: 32` của config). ⬜ shape latent thô của
+`generate_latents` vẫn chưa ghi lại.
+
+**🔑 Bài học toạ độ (đóng câu hỏi mở io_system2.md 3.d.1):** model nhả toạ độ `"u v"` **trực tiếp
+trong không gian 640×480 gốc** dù input resize 384 — bằng chứng: 20/98 frame có toạ độ vượt 384
+(max 563). Công thức G2 ban đầu scale `×640/384` là **sai**, thổi mean L2 từ 41.8 → 206 px. Quy đổi
+đúng: `u=coord[0], v=coord[1]` (chỉ đảo lại thứ tự lưu `[row,col]`), không scale.
+
 ---
 
 ## Chỉ mục tra ngược (file nào dùng bằng chứng nào)
@@ -517,5 +630,8 @@ conjunction) trước khi kết luận.
 | PL-B4, B5, B6 | [04_checkpoint_details](04_checkpoint_details.md) |
 | PL-C1, C2, C3 | [02_code_structure](02_code_structure.md) mục 1–2, [01](01_system_requirements.md) (override), [04](04_checkpoint_details.md) (chọn checkpoint) |
 | PL-C4, C5, C6 | [02_code_structure](02_code_structure.md) mục 3–6 |
+| PL-C7 | [06_eval_plan_w_navdp_kaggle](06_eval_plan_w_navdp_kaggle.md) bước C5 (file DepthAnything khi dựng NavDP) |
 | PL-D1…D5 | [03_data_contract](03_data_contract.md) |
 | PL-E1 | [02](02_code_structure.md) mục 5, [03](03_data_contract.md) (giới hạn eval) |
+| PL-E2 | [04](04_checkpoint_details.md) mục 2.1, [06](06_eval_plan_w_navdp_kaggle.md) GATE 1 |
+| PL-E3 | [06](06_eval_plan_w_navdp_kaggle.md) GATE 2/3 + G2, [02](02_code_structure.md) mục 3.2 & 4.3, `../io_system2.md` 3.d.1 |

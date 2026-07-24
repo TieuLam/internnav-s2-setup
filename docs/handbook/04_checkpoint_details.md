@@ -44,8 +44,12 @@ README InternNav v0.3.1, mục Model Zoo).
    riêng (PL-C1). Có thể đọc thêm: [02_code_structure](02_code_structure.md) mục 0–1.
 2. **Hai kiến trúc System 1 khác nhau** đang tồn tại song song (đây là phát hành có chủ đích của
    InternRobotics, không phải bản cũ/mới thay nhau — technical report nêu rõ 2 cấu hình):
-   - **NavDP** — diffusion policy, cần **RGB-D** (có nhánh encoder depth riêng, có critic chấm điểm
-     quỹ đạo). Weight keys: `model.language_model.navdp.*` (đo thật PL-B3).
+   - **NavDP** — diffusion policy, cần **RGB-D** (có nhánh encoder depth riêng). Kiến trúc **có**
+     critic (`critic_head` — `navdp.py:80`) nhưng ⚠️ **đường inference async không dùng nó**:
+     `predict_pointgoal_action_async` chọn quỹ đạo bằng **trung bình 32 mẫu diffusion**, không chấm
+     điểm (đọc code 23/07 — `navdp.py:197–253`, `vln_utils.py:128–132`; giải thích đầy đủ ở
+     [02_code_structure](02_code_structure.md) mục 4.3). Weight keys: `model.language_model.navdp.*`
+     (đo thật PL-B3).
    - **NextDiT** — DiT (diffusion transformer), **RGB-only**, không critic. Weight keys: `traj_dit`,
      `memory_encoder`, `rgb_resampler`… (đo thật PL-B5).
 3. **DAgger** (viết tắt của Dataset Aggregation) — kỹ thuật huấn luyện bổ sung; hậu tố `-wo-dagger`
@@ -71,10 +75,14 @@ README InternNav v0.3.1, mục Model Zoo).
   được dựng đúng, weights `navdp.*` vào đủ — **không cần patch gì**.
 - **Cần biết trước khi dùng:**
   - ❌ **Không có `tokenizer.json`** (fast tokenizer) — chỉ `vocab.json`+`merges.txt` (kiểm đủ 16 file,
-    PL-B4) → với `transformers` 5.x có rủi ro đường slow-tokenizer; phương án an toàn là pin
-    `transformers==4.51.*` khi dùng bản này (cùng loại rủi ro đã ghi cho DualVLN).
+    PL-B4) → pin `transformers==4.51.*` (đúng pin trong `requirements/internvla_n1.txt`).
+    ✅ **Đã kiểm chứng runtime 23/07:** trên 4.51.0 convert slow→fast chạy ổn (`is_fast=True`) —
+    rủi ro không thành hiện thực khi pin đúng (PL-E2).
   - Sensor: cần **cả RGB lẫn depth** (NavDP là RGB-D) — data `vln_ce` có sẵn cả hai (PL-D4).
-  - ⬜ Nhóm **chưa tải/chạy bản này** — mọi thông tin trên là từ HF API + config, chưa phải số đo runtime.
+  - Cần thêm file phụ `checkpoints/depth_anything_v2_vits.pth` (~99 MB) lúc dựng kiến trúc —
+    hardcode trong `navdp_backbone.py:109`, thiếu là crash (PL-C7; fix ở file 06 bước C5).
+  - ✅ **Đã load thành công trên Kaggle T4×2 (23/07 — PL-E2):** S1 nạp đủ (navdp 98.8M params —
+    khớp chênh lệch shard-4 +0.196GB của PL-B1), chia 2 GPU 7.57+9.21 GB. GATE 2/3 (inference) ⬜ đang chạy.
 
 ### 2.2. `InternVLA-N1-DualVLN` — bản dual-system mới nhất, S1 NextDiT, RGB-only
 

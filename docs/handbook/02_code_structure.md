@@ -251,10 +251,13 @@ else:                                                # KHÔNG có số → nhán
     output.output_action = action_seq
 ```
 
-> ⚠️ Ba bẫy parser đã ghi nhận: (a) đảo toạ độ `[row,col]` trong khi data `vln_ce` lưu goal `[u,v]`;
-> (b) chỉ cần *một chữ số bất kỳ* trong text là bị coi là pixel goal; (c) text không số + không ký tự
-> action → trả list rỗng, không báo lỗi. Chi tiết: `../io_system2.md` mục 3.d.
-> Lần chạy thật gần nhất S2 rơi nhánh **action** (`←←←←`), chưa ra pixel/latent — bằng chứng PL-E1.
+> ⚠️ Ba bẫy parser đã ghi nhận: (a) đảo toạ độ `[row,col]` trong khi data `vln_ce` lưu goal `[u,v]`
+> — ✅ đo 23/07 (PL-E3): toạ độ model nhả ở **không gian 640×480 gốc** (dù input đã resize 384), cùng
+> hệ với GT → khi so sánh chỉ cần đảo thứ tự, **KHÔNG scale 384→640**; (b) chỉ cần *một chữ số bất
+> kỳ* trong text là bị coi là pixel goal; (c) text không số + không ký tự action → trả list rỗng,
+> không báo lỗi. Chi tiết: `../io_system2.md` mục 3.d.
+> Chạy thật 23/07: S2 **ra được pixel+latent** qua cơ chế look-down 2 nhịp (file 06 Phase E, PL-E3)
+> — nghi vấn PL-E1 cũ ("chỉ ra action") đã đóng.
 
 ---
 
@@ -325,6 +328,81 @@ Những con số phải nhớ khi tự chuẩn bị input cho S1:
 - ⚠️ Nếu dữ liệu của bạn là depth **milimét** (như PNG của `vln_ce` — PL-D4) thì phép "×10" ở trên
   KHÔNG áp dụng nguyên xi — phải tự quy về mét trước. Xem hướng dẫn cụ thể ở
   [03_data_contract](03_data_contract.md) mục 4.
+
+### 4.3. Cấu trúc output của S1 — mổ xẻ `S1Output` (đọc code 23/07/2026)
+
+**a. Dataclass** — 📄 `internnav/model/utils/vln_utils.py:177–184`:
+
+```python
+@dataclass
+class S1Output:
+    idx: Optional[list] = None                # ← field DUY NHẤT được điền trong đường s1_step_latent
+    trajectory: Optional[np.ndarray] = None   # None — dự phòng cho agent khác
+    linear_velocity: Optional[float] = None   # None — dành cho robot thật (điều khiển vận tốc)
+    angular_velocity: Optional[float] = None  # None — như trên
+    vis_image: Optional[np.ndarray] = None    # None — ảnh debug
+```
+
+`s1_step_latent` chỉ tạo `S1Output(idx=action_list[:4])` (`internvla_n1_policy.py:214`) — 4 field
+còn lại tồn tại vì dataclass dùng chung với agent realworld. **Đừng trông đợi `trajectory` có giá
+trị** ở đường này; muốn waypoint xem mục (d).
+
+**b. Bảng mã của `idx`** — list **tối đa 4 phần tử**, mỗi phần tử ∈ {1, 2, 3}:
+
+| Mã | Nghĩa | Độ lớn vật lý | Nguồn số |
+|---|---|---|---|
+| `1` | ↑ tiến thẳng | **0.25 m** | `step_size=0.25` (`vln_utils.py:87`) |
+| `2` | ← quay trái | **15°** | `turn_angle_deg=15` (`vln_utils.py:87`) |
+| `3` | → quay phải | **15°** | như trên |
+| `0` | stop | — | **bị lọc** trước khi trả (`internvla_n1_policy.py:212`) |
+
+Mã `5` (look-down) **không bao giờ** xuất hiện từ S1 — nó là chuyện riêng của S2 (mục 3.2).
+Ví dụ đọc: `idx == [2, 2, 1, 1]` = "quay trái 30° rồi tiến 0.5 m".
+
+**c. Đường biến đổi latent → idx** (nhánh `navdp_async` + `continuous_traj=True` — cấu hình của
+config chính chủ `h1_internvla_n1_async_cfg.py`):
+
+| # | Bước | Code | Tensor/kết quả |
+|---|---|---|---|
+| 1 | Điều kiện hoá: latent S2 → goal embedding (`vlm_embed_mlp`+`goal_compressor`); cặp RGB-D → `rgbd_encoder` | `navdp.py:237–241` | latent (1, 4, 3584); rgbs [1,2,224,224,3], depths [1,2,224,224,1] |
+| 2 | Diffusion: khởi tạo noise rồi khử nhiễu 20 bước DDPM | `navdp.py:242–253` | **(32, 32, 3)** — 32 ứng viên × 32 bước **(dx, dy, dyaw)** — ✅ `predict_size=32` đo runtime 23/07 (s1_traj trả (33, 2) = T+1) |
+| 3 | Un-normalize (`xy /= 4`), cộng dồn delta thành đường xy, rồi **trung bình cộng cả 32** thành 1 quỹ đạo | `vln_utils.py:128–132` | (T+1, 2) — mét, xuất phát (0,0). ⚠️ **KHÔNG dùng critic** — `critic_head` có trong kiến trúc (`navdp.py:80`) nhưng đường async không gọi |
+| 4 | "Robot ảo" bám quỹ đạo → mã rời rạc: quay từng nấc 15°, tiến 0.25 m/bước; dừng khi cách đích < 0.2 m hoặc tiến thêm lại xa đích hơn | `vln_utils.py:87–126` | list mã {0,1,2,3} độ dài tuỳ quỹ đạo |
+| 5 | Lọc bỏ `0`, cắt **4 phần tử đầu** | `internvla_n1_policy.py:212–214` | `S1Output(idx=[...])` |
+
+Con số 4 ở bước 5 khớp nhịp async (mục 6): S1 chỉ được tin tối đa 4 bước
+(`num_future_steps: 4`) trước khi S2 kịp suy nghĩ lại.
+
+**d. Liên hệ với data contract ([03_data_contract](03_data_contract.md)):**
+
+- `idx` dùng **cùng bảng mã** với cột GT `action` của `vln_ce` (03 mục 1.2, 4.4) → có thể so thô
+  `idx[0]` với GT từng frame như một tín hiệu định lượng phụ — nhưng nhớ giới hạn open-loop
+  (03 mục 4.4: quỹ đạo S1 không có GT liên tục trong `vln_ce`).
+- GT quỹ đạo liên tục thật sự chỉ có ở `vln_n1` (cột `action` SE(3) 4×4 — 03 mục 2.2–2.3); muốn
+  chấm số cho waypoint phải tự quy đổi SE(3) → (dx, dy, dyaw).
+- Muốn **waypoint để vẽ** thay vì action rời rạc: `traj_to_actions(trajs, use_discrate_action=False)`
+  trả thẳng quỹ đạo trung bình (T+1, 2) mét — dùng cho visualize (file 06 bước F2).
+  ⚠️ Hàm này un-normalize **in-place** (chia 4 trực tiếp vào tensor đầu vào) — đừng gọi 2 lần trên
+  cùng một tensor.
+- Nhánh `continuous_traj=False` (không dùng trong config của ta): chọn **ngẫu nhiên 1 trong 32**
+  ứng viên rồi lượng tử hoá từng bước bằng `chunk_token` (`vln_utils.py:36–60`) — cùng bảng mã.
+
+**e. Hiện trạng các field còn lại — và điều kiện để tự điền (grep toàn repo 23/07):**
+
+Không một dòng code nào trong v0.3.1 điền `trajectory` / `linear_velocity` / `angular_velocity`;
+riêng `vis_image` có *người tiêu thụ* (agent lưu PNG + ghi video — `internvla_n1_agent.py:395–399`)
+nhưng không có *người sản xuất*.
+
+| Field | Hiện trạng | Muốn có thì |
+|---|---|---|
+| `trajectory` | **Tính xong nội bộ rồi vứt** — quỹ đạo trung bình chỉ là bước trung gian sinh `idx` (bước 3–4 bảng trên) | Rẻ nhất: gọi `generate_traj` + `traj_to_actions(..., use_discrate_action=False)` bên ngoài policy — file 06 Phase F có sẵn hàm `s1_step_full` kiểu này |
+| `linear/angular_velocity` | **Không tồn tại ở bất kỳ đâu trong luồng S1** | Tự viết: chọn chu kỳ điều khiển `dt` (giả định ngoài code) rồi tính v ≈ ‖Δxy‖/dt, ω ≈ Δyaw/dt; Δyaw nằm ở kênh `dp_actions[:,:,2]` (tự mean qua 32 ứng viên). Trong open-loop hai số này chỉ mang tính minh hoạ |
+| `vis_image` | "Ổ cắm" có sẵn phía agent, không ai cắm | Tự vẽ (overlay waypoint); chỉ có ích khi chạy qua agent — đường policy-trực-tiếp tự visualize ngoài notebook |
+
+⚠️ **Đừng nhầm về controller:** gắn robot controller vào cũng KHÔNG làm `S1Output` trả velocity.
+Luồng thật của repo: `S1Output.idx → agent/env → controller đổi thành v, ω
+(h1_vln_move_by_speed_controller.py — Isaac) → khớp robot` — vận tốc sinh ra **ở controller, phía
+hạ nguồn**, và không ghi ngược về `S1Output`.
 
 ---
 

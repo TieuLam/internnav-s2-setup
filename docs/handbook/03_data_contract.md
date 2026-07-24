@@ -272,8 +272,12 @@ rgbs   = torch.stack([torch.from_numpy(pix_rgb), torch.from_numpy(cur_rgb)]).uns
 depths = torch.stack([torch.from_numpy(pix_d),  torch.from_numpy(cur_d)]).unsqueeze(0).unsqueeze(-1)   # [1,2,224,224,1]
 
 s1_out = policy.s1_step_latent(rgbs.to(device), depths.to(device), s2_out.output_latent)
-print(s1_out.idx)      # toi da 4 action dau cua quy dao
+print(s1_out.idx)      # toi da 4 action dau, ma thuoc {1,2,3} — 1=tien 0.25m, 2=trai 15°, 3=phai 15°
 ```
+
+> **Giải mã output:** cấu trúc đầy đủ của `S1Output` (field nào có giá trị, field nào luôn None),
+> bảng mã action kèm độ lớn vật lý, và đường biến đổi latent → 32 quỹ đạo diffusion → trung bình →
+> action rời rạc: xem [02_code_structure](02_code_structure.md) **mục 4.3**.
 
 > 🚨 **Điểm dễ sai nhất — đơn vị depth.** Agent gốc viết cho depth Habitat (chuẩn hoá [0,1], nhân 10
 > thành mét). Depth `vln_ce` là **uint16 milimét** (PL-D4) → phép quy đổi phải là `/1000`. Dòng này
@@ -289,6 +293,9 @@ print(s1_out.idx)      # toi da 4 action dau cua quy dao
 | Pixel-goal L2 của S2 | ✅ cột `goal.{setting}` (frame có goal ≠ `(-1,-1)`) | đảo [row,col]→[u,v], scale 384→640×480, tính L2 |
 | Quỹ đạo S1 | ❌ **không có GT liên tục trong `vln_ce`** | chỉ định tính: overlay waypoint lên ảnh, đếm tỉ lệ frame sinh được quỹ đạo hợp lệ (không NaN/rỗng). GT thật nằm ở `vln_n1` (mục 2.3) |
 | SR/SPL benchmark | ❌ | cần closed-loop trong simulator — ngoài phạm vi Kaggle |
+
+Kết quả chấm theo bảng trên được vòng eval lưu thành `results.json` — **schema + cách đọc từng
+field (kèm bản mẫu thật đã chạy 23/07): file [06](06_eval_plan_w_navdp_kaggle.md) mục G1.b**.
 
 ### 4.5. Nếu muốn dùng `vln_n1` / `vln_pe` cho eval
 

@@ -60,10 +60,10 @@ tải 16.78GB w-NavDP                  tải vài scene vln_ce (~100MB)
 
 | # | Rủi ro ⬜ | Gate bắt |
 |---|---|---|
-| R1 | Slow→fast tokenizer convert lỗi trên 4.51 (không có `tokenizer.json`) | GATE 1 (Phase D) |
-| R2 | `ModelCfg` (pydantic 2) đòi field không có default (`policy_name`, `state_encoder`) → ValidationError | GATE 1 — dict ở Phase D đã điền sẵn cả hai |
-| R3 | `device_map="auto"` đặt `navdp` lệch GPU với latent → lỗi device mismatch khi `generate_traj` | GATE 3 (Phase F) — có sẵn cách fix `.to()` |
-| R4 | S2 rơi nhánh action (`←←←←`), không có latent — như lần đo PL-E1 (nhưng lần đó là bản wo-dagger + class HF thuần; lần này là bản DAgger + full policy → chính là thứ cần kiểm) | GATE 2 (Phase E) |
+| R1 | ~~Slow→fast tokenizer convert lỗi trên 4.51~~ → ✅ **ĐÓNG 23/07:** convert OK, `is_fast=True` (PL-E2) | GATE 1 — pass |
+| R2 | ~~`ModelCfg` (pydantic 2) đòi field không có default~~ → ✅ **ĐÓNG 23/07:** dict D1 được nhận (PL-E2) | GATE 1 — pass |
+| R3 | `device_map="auto"` đặt `navdp` lệch GPU với latent → ✅ đo 23/07: `navdp` nằm GPU1 **cùng** layer cuối LLM → khả năng cao không xảy ra; giữ `.to(navdp_dev)` làm dây an toàn (PL-E2) | GATE 3 (Phase F) |
+| R4 | ~~S2 rơi nhánh action, không có latent~~ → ✅ **ĐÓNG 23/07:** nguyên nhân thật là cơ chế **look-down 2 nhịp** — model trả `↓` (action 5) xin cúi camera, phải gọi `s2_step` lần hai với `look_down=True` mới ra pixel+latent (cell E2). PL-E1 được giải thích trọn vẹn. | GATE 2 — pass |
 | R5 | Quy đổi depth mm→m cho S1 (agent gốc viết cho depth Habitat chuẩn hoá [0,1] ×10) | GATE 3 — in min/max depth |
 | R6 | Submodule `diffusion-policy` rỗng sau clone (bản clone local của nhóm đang rỗng) | Phase C — verify + fallback pip git |
 | R7 | OOM khi generate (KV-cache + navdp) | Phase D/F — đo `max_memory_allocated`, fallback §6 |
@@ -289,6 +289,37 @@ from internnav.model import get_policy, get_config          # keo theo diffusers
 print("import OK")
 ```
 
+**C5. Tải backbone DepthAnything V2 ViT-S — bắt buộc, thiếu là Phase D crash (✅ đã gặp thật 23/07)**
+
+> Khi dựng kiến trúc NavDP, constructor của `DAT_RGBD_Patch_Backbone` load ngay một file
+> **hardcode đường dẫn tương đối** `checkpoints/depth_anything_v2_vits.pth`
+> (`internnav/model/encoder/navdp_backbone.py:109` + `:124`, được `navdp.py:53–55` gọi mà không
+> truyền path khác — PL-C7). Thiếu file → `FileNotFoundError` ngay trong `PolicyCls(...)` ở D3.
+> **Weights file này không ảnh hưởng kết quả** — sau khi dựng, `from_pretrained` ghi đè toàn bộ
+> `navdp.rgbd_encoder.rgb_model.*` bằng weights trong checkpoint 16.78GB (nhóm tensor này có mặt
+> trong checkpoint — PL-B3). Nó chỉ cần tồn tại để constructor chạy qua.
+
+```python
+import os
+from huggingface_hub import hf_hub_download
+
+os.makedirs("/kaggle/working/checkpoints", exist_ok=True)
+hf_hub_download(
+    "depth-anything/Depth-Anything-V2-Small",     # repo chinh chu, public, apache-2.0 (xac minh 23/07)
+    "depth_anything_v2_vits.pth",
+    local_dir="/kaggle/working/checkpoints",
+)
+p = "/kaggle/working/checkpoints/depth_anything_v2_vits.pth"
+print(round(os.path.getsize(p) / 1e6, 1), "MB")   # ~99 MB
+assert os.path.getsize(p) > 5e7
+
+os.chdir("/kaggle/working")                        # duong dan hardcode la TUONG DOI theo CWD
+print("CWD:", os.getcwd())
+```
+
+> Ghi chú: file họ hàng `depth_anything_v2_metric_hypersim_vits.pth`
+> (`internvla_n1_arch.py:36`) **không cần** cho đường này — chỉ nhánh `nextdit_async` (DualVLN) dùng.
+
 ---
 
 ## Phase D — Load full dual-system + GATE 1 (điểm quyết định số 1)
@@ -335,7 +366,17 @@ policy = PolicyCls(config=PolicyCfg(model_cfg={"model": model_settings}))
 policy.eval()
 ```
 
-**D4. GATE 1 — 5 phép kiểm bắt buộc:**
+> ℹ️ **Warning kỳ vọng khi load (✅ gặp thật 23/07):** hàng loạt dòng
+> `UserWarning: for pretrained.cls_token: copying from a non-meta parameter in the checkpoint to a
+> meta parameter in the current model, which is a no-op...` — **vô hại, bỏ qua.**
+> Nguyên nhân: `device_map="auto"` dựng model trên **meta device** (khung rỗng, chưa cấp phát bộ
+> nhớ); constructor NavDP lại tự `load_state_dict` file DepthAnything (C5) ngay lúc khung còn rỗng
+> (`navdp_backbone.py:124` — PL-C7) → copy vào tensor meta = no-op, mỗi tham số một dòng warning.
+> Weights DA đó đằng nào cũng bị checkpoint 16.78GB ghi đè (PL-B3/PL-C7). **KHÔNG** làm theo gợi ý
+> `assign=True` của warning. Điều kiện để thật sự yên tâm: phép kiểm (1b) meta-check ở GATE 1 dưới đây.
+
+**D4. GATE 1 — 5 phép kiểm bắt buộc:** *(✅ **ĐÃ PASS toàn bộ 23/07/2026** — số đo thật ở PL-E2:
+navdp 98.8M · meta sót 0 · latent_queries (1,4,3584) · tokenizer fast OK · GPU 7.57+9.21 GB)*
 
 ```python
 m = policy.model
@@ -343,6 +384,14 @@ m = policy.model
 # (1) S1 da duoc nap that su (PL-C2)
 n_navdp = sum(p.numel() for n, p in m.named_parameters() if "navdp" in n)
 print(f"navdp params: {n_navdp/1e6:.1f}M");  assert n_navdp > 0, "S1 KHONG duoc nap!"
+
+# (1b) khong con tham so meta sot lai (canh bao no-op luc dung la vo hai CHI KHI dieu nay dung)
+meta_left = [n for n, p in m.named_parameters() if p.is_meta]
+print("meta con sot:", len(meta_left), meta_left[:5]);  assert not meta_left, "Co tham so chua duoc nap!"
+
+# (1c) navdp weights la so thuc (checkpoint da ghi de len phan khoi tao meta/no-op)
+t = next(p for n, p in m.named_parameters() if "navdp" in n and "rgb_model" in n)
+print("navdp sample:", t.device, t.dtype, float(t.abs().mean()))   # mean > 0 la co weights that
 
 # (2) latent_queries dung shape n_query=4 (PL-B6)
 lq = m.get_model().latent_queries
@@ -411,7 +460,18 @@ INTR = np.array(model_settings["camera_intrinsic"])   # s2_step KHONG dung intri
 POSE = np.eye(4)                                       # agent goc cung truyen ma tran don vi (PL-C5)
 ```
 
-**E2. Chạy S2 tuần tự vài frame đầu episode** (frame 0 chưa có history — đúng thiết kế, file 02 mục 3.2):
+**E2. Chạy S2 hai nhịp mỗi frame — BẮT BUỘC xử lý cơ chế "look down"** *(✅ bản này đã chạy được
+23/07; bản một-nhịp cũ cho toàn `action [5]` không latent — xem cơ chế ngay dưới)*:
+
+> 🔑 **Cơ chế look-down (phát hiện 23/07, gặp thật khi chạy):** S2 thường KHÔNG nhả pixel-goal ngay.
+> Nó trả `llm_output = "↓"` → `parse_actions` dịch thành **action 5 = LOOK DOWN** — model *xin cúi
+> camera xuống* trước khi chọn điểm đến. Agent gốc xử lý riêng action 5
+> (`internvla_n1_agent.py:287–292`): đặt `look_down=True` rồi **gọi lại `s2_step` lần hai**; ở lượt
+> hai `s2_step` nối tiếp hội thoại thay vì xoá (`internvla_n1_policy.py:139–146`) và lúc đó model
+> mới nhả toạ độ pixel → nhánh `generate_latents` chạy (`:186–194`) → **có latent**.
+> Với setting `60cm_30deg`, config train chính chủ là `r2r_60cm_30_30` (file 04 mục 5.1) — cặp
+> `30_30` = góc nhìn thường và góc cúi **cùng 30°** → pass 2 dùng lại chính ảnh frame đó là trung
+> thực với cách model được train.
 
 ```python
 policy.reset()                                   # xoa history giua cac episode — BAT BUOC
@@ -419,30 +479,45 @@ ep_len = int(eps[0]["length"])
 records = []
 for fr in range(min(ep_len, 6)):                 # smoke: 6 frame dau
     rgb, depth = load_frame(0, fr)
+
+    # PASS 1 — nhin thuong
     out = policy.s2_step(rgb, depth, POSE, instruction, INTR, look_down=False)
+    tag = "normal  "
+
+    # PASS 2 — model xin cui camera (llm '↓' → action 5): goi lai voi look_down=True
+    # (mo phong agent goc :287–292; chi retry 1 lan, khong lap vo han)
+    if out.output_action and out.output_action[0] == 5:
+        out = policy.s2_step(rgb, depth, POSE, instruction, INTR, look_down=True)
+        tag = "lookdown"
+
     records.append(out)
-    print(fr,
+    print(fr, tag,
           "| pixel:",  out.output_pixel,
           "| action:", out.output_action,
-          "| latent:", None if out.output_latent is None else tuple(out.output_latent.shape))
+          "| latent:", None if out.output_latent is None else tuple(out.output_latent.shape),
+          "| llm:",    repr(policy.llm_output))
 ```
 
-**GATE 2 — đọc kết quả:**
+**GATE 2 — đọc kết quả:** *(✅ **ĐÃ PASS 23/07/2026** — với cell 2 nhịp ở trên, S2 trả
+`output_pixel` + `output_latent`; nghi vấn PL-E1 chính thức đóng: hôm 22/07 không ra pixel vì
+thiếu đúng cú look-down hai nhịp + full policy, không phải model hỏng)*
 
 | Quan sát | Nghĩa là | Đi tiếp thế nào |
 |---|---|---|
-| Có frame ra `output_pixel` + `output_latent` | ✅ nhánh pixel-goal hoạt động — **khác biệt then chốt so với PL-E1** (lần đó bản wo-dagger + class HF thuần) | → Phase F |
-| Toàn bộ ra `output_action` (mũi tên) | S2 vẫn né pixel-goal | Debug E3 ↓ |
+| Có frame ra `output_pixel` + `output_latent` (thường ở pass 2) | ✅ nhánh pixel-goal hoạt động — **kết quả thực tế 23/07** | → Phase F |
+| Pass 1 ra `↓` / action `[5]` | **KHÔNG phải lỗi** — model xin cúi camera, cơ chế 2 nhịp ở trên | Cell E2 đã tự xử lý (pass 2) |
+| Pass 2 **vẫn** ra `↓` | Model chưa chịu chốt goal trên ảnh này | Debug E3 ↓ |
+| Ra action điều hướng thật (`←→↑`) | S2 chọn hành động rời rạc cho frame đó — hợp lệ nếu GT cũng là action | Đối chiếu GT (E3 bước 2) |
 | `output_action == []` hoặc text lạ | parser rơi lỗ hổng đã ghi (`../io_system2.md` 3.d) | In `policy.llm_output` thô từng frame, ghi lại làm bằng chứng |
 
-**E3. Debug khi vẫn action-only (R4)** — thử theo thứ tự rẻ → đắt, ghi kết quả từng bước:
-1. Chạy **nhiều frame hơn / episode khác / scene r2r** (một scene rxr nhỏ có thể toàn action hợp lệ
-   — GT của nó cũng có nhiều frame action, xem cột `action` trong parquet).
+**E3. Debug khi pass 2 vẫn không ra pixel** — thử theo thứ tự rẻ → đắt, ghi kết quả từng bước:
+1. In `os.listdir(os.path.dirname(rgb_dir))` xem scene có setting góc cúi sâu hơn không
+   (vd `*_45deg`) → dùng ảnh setting đó làm ảnh pass 2 (mô phỏng cú cúi thật hơn).
 2. Đối chiếu: frame nào GT `goal.{SETTING}` ≠ `(-1,-1)` mà model vẫn không ra pixel → đó mới là
    bất thường thật; frame GT không có goal thì model ra action là **đúng hành vi**.
-3. Thử setting khác (`125cm_30deg`) + instruction khác.
-4. Vẫn 100% action trên các frame có GT goal → dừng, cập nhật PL-E1 với dữ kiện mới
-   (bản DAgger + full policy vẫn không bật pixel) — đây tự nó là một kết quả đáng báo cáo.
+3. Chạy **nhiều frame hơn / episode khác / scene r2r**, thử setting khác (`125cm_30deg`) +
+   instruction khác.
+4. Vẫn 100% action trên các frame có GT goal → dừng, ghi nhận trung thực làm kết quả báo cáo.
 
 ---
 
@@ -479,24 +554,49 @@ latent = records[GOAL_FR].output_latent
 if latent.device != navdp_dev:
     latent = latent.to(navdp_dev)                 # fix R3 neu lech GPU
 
-s1_out = policy.s1_step_latent(rgbs, depths, latent)
-print("S1 actions:", s1_out.idx)                  # ky vong list 1-4 phan tu thuoc {1,2,3,5}
+# --- s1_step_full: nhu s1_step_latent cua repo NHUNG dien ca trajectory ---
+# Repo tinh quy dao trung binh roi VUT (file 02 muc 4.3e). Ta chay generate_traj MOT lan,
+# suy ra ca idx lan waypoints tu cung dp_actions.
+# .clone() la bat buoc: traj_to_actions un-normalize IN-PLACE (chia 4 vao tensor) —
+# moi tensor chi duoc di qua no dung 1 lan.
+from internnav.model.utils.vln_utils import traj_to_actions, S1Output
+
+def s1_step_full(rgbs, depths, latent):
+    with torch.no_grad():
+        dp_actions = policy.model.generate_traj(traj_latents=latent, images_dp=rgbs, depths_dp=depths)
+    waypoints = traj_to_actions(dp_actions.clone(), use_discrate_action=False)  # (T+1, 2) met, xuat phat (0,0)
+    actions   = traj_to_actions(dp_actions,         use_discrate_action=True)   # giong nhanh continuous_traj cua repo
+    actions   = [x for x in actions if x != 0][:4]      # loc stop + cat 4 — y het internvla_n1_policy.py:212-214
+    return S1Output(idx=actions, trajectory=waypoints)
+
+s1_out = s1_step_full(rgbs, depths, latent)
+print("S1 actions:",    s1_out.idx)               # ky vong list 1-4 phan tu thuoc {1,2,3}
+print("S1 trajectory:", s1_out.trajectory.shape,  # ky vong (T+1, 2)
+      "| NaN:", bool(np.isnan(s1_out.trajectory).any()))
+# (1=tien 0.25m, 2=trai 15°, 3=phai 15°; ma 0=stop bi loc san; ma 5 KHONG bao gio co tu S1 —
+#  no la chuyen rieng cua S2/look-down. Giai ma day du: file 02 muc 4.3)
 ```
 
 **GATE 3:**
 - `s1_out.idx` là list hợp lệ (không rỗng, không NaN) → pipeline dual-system **thông**.
+- `s1_out.trajectory` shape (T+1, 2), không NaN, waypoint đầu = (0,0) — quỹ đạo mét trong hệ robot.
 - Lỗi dtype (bf16 vs float32) → thử `rgbs = rgbs.to(torch.bfloat16)` (và depths tương tự) — ghi lại
   bản nào chạy. ⬜ chưa xác minh trước dtype nào đúng.
 - Lỗi device → đã có fix `.to(navdp_dev)` ở trên; nếu vẫn lỗi trong `generate_traj`, in device từng
   input và báo lại (ứng viên bug report).
 
-**F2 (tuỳ chọn — lấy quỹ đạo thô để visualize):** `s1_step_latent` chỉ trả action rời rạc đã
-lượng tử hoá (file 02 mục 4.1); muốn vẽ waypoint thì gọi thẳng:
+**F2 (tuỳ chọn — lấy cả 32 ứng viên thô để vẽ "quạt" quỹ đạo):** quỹ đạo **trung bình** đã nằm sẵn
+trong `s1_out.trajectory` (hàm `s1_step_full` ở trên) — F2 chỉ cần khi muốn visualize độ phân tán
+của 32 mẫu diffusion (định tính độ "tự tin" của S1):
 
 ```python
 with torch.no_grad():
     trajs = policy.model.generate_traj(traj_latents=latent, images_dp=rgbs, depths_dp=depths)
-print(type(trajs), getattr(trajs, "shape", None))   # ⬜ shape chua do — ghi lai lan dau chay
+print(trajs.shape)         # (32, 32, 3) — 32 ung vien × 32 buoc (dx,dy,dyaw); predict_size=32 ✅ do 23/07
+
+trajs[:, :, :2] /= 4.0                                   # un-normalize xy (nhu vln_utils.py:129)
+fan = np.cumsum(trajs[:, :, :2].float().cpu().numpy(), axis=1)   # (32, T, 2) — 32 duong xy de ve
+# ve: 32 duong mo + s1_out.trajectory dam — thay duoc do phan tan quanh quy dao trung binh
 ```
 
 ---
@@ -522,7 +622,12 @@ for ep_i, ep in enumerate(eps):
         rgb, depth = load_frame(ep_i, fr)
         t0 = time.time()
         out = policy.s2_step(rgb, depth, POSE, instr, INTR, False)
+        looked_down = False
+        if out.output_action and out.output_action[0] == 5:   # co che look-down 2 nhip (nhu E2)
+            out = policy.s2_step(rgb, depth, POSE, instr, INTR, True)
+            looked_down = True
         rec = {"ep": ep_i, "fr": fr, "t_s2": round(time.time() - t0, 2),
+               "looked_down": looked_down,
                "gt_action": int(gt_act[fr]),
                "gt_goal": [int(x) for x in np.ravel(gt_goal[fr])],
                "pred_action": None if out.output_action is None else [int(a) for a in out.output_action],
@@ -530,8 +635,9 @@ for ep_i, ep in enumerate(eps):
                "llm_output": policy.llm_output}
         if out.output_latent is not None:            # S1 chi chay khi co latent
             # ... prep nhu Phase F (frame goal = frame nay, frame hien tai = frame nay) ...
-            s1 = policy.s1_step_latent(rgbs, depths, out.output_latent.to(navdp_dev))
+            s1 = s1_step_full(rgbs, depths, out.output_latent.to(navdp_dev))   # ham dinh nghia o Phase F
             rec["s1_actions"] = [int(a) for a in s1.idx]
+            rec["s1_traj"]    = np.round(s1.trajectory, 3).tolist()            # (T+1, 2) met — cho G3 ve
         RESULTS["frames"].append(rec)
         if fr % 8 == 0:
             torch.cuda.empty_cache()                 # quan ly VRAM tren loop dai
@@ -539,7 +645,41 @@ for ep_i, ep in enumerate(eps):
 json.dump(RESULTS, open("/kaggle/working/results/results.json", "w"), indent=1)
 ```
 
-**G2. Metric S2** (đúng giới hạn đã ghi ở [03](03_data_contract.md) mục 4.4):
+**G1.b — Cách đọc `results.json`** (schema đầu ra — bản mẫu thật: `docs/handbook/results.json`):
+
+Cấp cao nhất có 3 key: `setting` (camera setting của run — quyết định cột GT `goal.{setting}` nào
+được so), `ckpt` (checkpoint đã dùng), `frames` (list record — **mỗi phần tử = 1 frame đã qua S2**,
+và qua cả S1 nếu frame đó có latent).
+
+Từng field trong một record của `frames`:
+
+| Field | Kiểu | Ý nghĩa & cách đọc |
+|---|---|---|
+| `ep` | int | Chỉ số episode trong scene (khớp thứ tự `meta/episodes.jsonl` và cột `episode_index` parquet — file 03 mục 1) |
+| `fr` | int | Chỉ số frame trong episode, đếm từ 0 |
+| `t_s2` | float (giây) | Thời gian S2 xử lý frame — **gồm cả 2 nhịp** nếu `looked_down` (đo thật: mean 35.5s — PL-E3) |
+| `looked_down` | bool | `true` = nhịp 1 model trả `↓` (xin cúi camera) và record này là kết quả **nhịp 2** (cơ chế Phase E) |
+| `gt_action` | int | GT từ cột `action` parquet; **`-1` = frame đầu không có GT → loại khỏi accuracy** |
+| `gt_goal` | [int, int] | GT từ cột `goal.{setting}`, thứ tự **[u, v]** (u ngang 0–639, v dọc 0–479); **`[-1,-1]` = frame không có goal** → loại khỏi L2 |
+| `pred_action` | list \| null | Chuỗi action khi S2 rơi nhánh action — mã {0,1,2,3}: 0=STOP, 1=tiến, 2=trái, 3=phải; `null` khi frame ra pixel. Metric chỉ so phần tử `[0]` |
+| `pred_pixel_rowcol` | [int, int] \| null | Pixel goal, **lưu đảo [row, col] = [v, u]** — muốn so với `gt_goal` phải đảo lại (`u`=phần tử thứ 2, `v`=phần tử thứ 1); cùng không gian 640×480 với GT, **không scale** (PL-E3) |
+| `llm_output` | str | Text thô model sinh ở **nhịp cuối** của frame (nếu `looked_down` → đây là output nhịp 2); `"270 173"` đọc là `"u v"` |
+| `s1_actions` | list | **Chỉ có khi frame ra latent.** ≤4 mã ∈ {1,2,3}: 1=tiến 0.25 m, 2=trái 15°, 3=phải 15° (bảng mã: file 02 mục 4.3) |
+| `s1_traj` | list (33, 2) | **Chỉ có khi frame ra latent.** 33 waypoint `[x, y]` **mét, hệ robot**: gốc (0,0) = vị trí hiện tại, **+x = hướng nhìn, +y = bên trái**; 33 = predict_size 32 + điểm gốc (PL-E3) |
+
+**Đọc thử record đầu tiên của bản mẫu** (ep0/fr0): `looked_down: true` → model phải cúi mới chốt
+goal; `llm_output "270 173"` → goal tại (u,v)=(270,173); `gt_goal [500,93]` → L2 ≈ 244 px (outlier
+— frame 0 chưa có history, đúng thiết kế); `s1_traj` có y trôi dần về −0.34 (lệch **phải**) — khớp
+`s1_actions [1,1,3,1]` (tiến, tiến, rẽ phải, tiến); `gt_action: -1` → frame này không tính accuracy.
+
+Quy tắc suy metric từ record (đúng logic G2 bên dưới): **accuracy** đếm trên frame có
+`gt_action ≠ -1` VÀ `pred_action ≠ null`; **L2** đếm trên frame có `pred_pixel_rowcol ≠ null` VÀ
+`gt_goal ≠ [-1,-1]` — hai tập frame này **không giao nhau** (mỗi frame chỉ ra 1 trong 2 nhánh).
+
+**G2. Metric S2** (đúng giới hạn đã ghi ở [03](03_data_contract.md) mục 4.4) — *✅ chạy thật 23/07
+trên 3 episode/128 frame (PL-E3): pixel L2 **mean 41.8 / median 20.0 px** (n=98, công thức đã sửa
+dưới đây); action acc 37.04% (n=27) — nhưng 10/17 lỗi là "STOP sớm" dồn ở cuối episode, chỉ 7 lỗi
+điều hướng thật*:
 
 ```python
 frames = RESULTS["frames"]
@@ -550,18 +690,23 @@ pairs = [(f["gt_action"], f["pred_action"][0]) for f in frames
 acc = sum(g == p for g, p in pairs) / max(len(pairs), 1)
 print(f"action acc: {acc:.2%}  ({len(pairs)} frame)")
 
-# (b) Pixel-goal L2 — DAO [row,col]→[u,v] + scale 384→640x480 (file 02 muc 3.2; io_system2 3.d)
+# (b) Pixel-goal L2 — model nha toa do "u v" TRUC TIEP trong khong gian 640x480 goc, KHONG scale!
+# Chung minh bang 98 frame that 23/07 (PL-E3): 20 frame co toa do >384 (max 563) — khong the la
+# khong gian 384. Ban dau G2 nham scale 384->640 → mean bi thoi tu 41.8 len 206 px.
 l2s = []
 for f in frames:
     if f["pred_pixel_rowcol"] and f["gt_goal"] != [-1, -1]:
-        row, col = f["pred_pixel_rowcol"]
-        u, v = col * 640 / 384, row * 480 / 384          # ve he anh goc
+        row, col = f["pred_pixel_rowcol"]                # [row,col] = [v,u] — chi bi DAO thu tu khi luu
+        u, v = col, row                                  # dao lai la xong — cung he 640x480 voi GT
         gu, gv = f["gt_goal"]
         l2s.append(((u - gu) ** 2 + (v - gv) ** 2) ** 0.5)
-print(f"pixel L2 (px): mean={np.mean(l2s):.1f}  n={len(l2s)}" if l2s else "khong co frame pixel nao")
+print(f"pixel L2 (px): mean={np.mean(l2s):.1f}  median={np.median(l2s):.1f}  n={len(l2s)}"
+      if l2s else "khong co frame pixel nao")
 ```
 
-**G3. Visualize** — vẽ `pred_pixel` (chấm xanh) lên RGB gốc; nếu có F2 thì overlay quỹ đạo/bird-eye
+**G3. Visualize** — vẽ `pred_pixel` (chấm xanh) lên RGB gốc; vẽ bird-eye quỹ đạo S1 từ
+`rec["s1_traj"]` đã lưu trong `results.json` (xy mét, xuất phát (0,0) — trục x là hướng nhìn robot);
+nếu chạy thêm F2 thì overlay "quạt" 32 ứng viên quanh quỹ đạo trung bình
 → lưu `/kaggle/working/results/vis/*.png` (≥3 ảnh cho báo cáo).
 
 **G4. Ghi bản ghi phần cứng** vào `summary.json`: VRAM đỉnh mỗi GPU, giây/frame S2 và S1, version
@@ -571,11 +716,13 @@ print(f"pixel L2 (px): mean={np.mean(l2s):.1f}  n={len(l2s)}" if l2s else "khong
 
 ## §4. Definition of Done
 
-- [ ] Kaggle Dataset `internvla-n1-w-navdp-ckpt` tồn tại, verify đủ 16 file + `system1: navdp_async` (GATE A).
-- [ ] Notebook GPU qua **GATE 1**: `navdp params > 0`, `latent_queries (1,4,3584)`, tokenizer hoạt động, model chia 2 GPU.
-- [ ] **GATE 2** có kết luận rõ (bật được pixel-goal hay không — kể cả "không" cũng là kết quả, cập nhật PL-E1).
-- [ ] Nếu có latent: **GATE 3** — S1 xuất action hợp lệ; depth range in ra nằm trong [0,5] m.
-- [ ] `results.json` + `summary.json` + ≥3 ảnh visualize trong `/kaggle/working/results/`.
+- [x] Kaggle Dataset `internvla-n1-w-navdp-ckpt` tồn tại, verify đủ 16 file + `system1: navdp_async` (GATE A).
+- [x] Notebook GPU qua **GATE 1**: navdp 98.8M, meta sót 0, latent_queries (1,4,3584), tokenizer fast OK, chia 2 GPU 7.57+9.21 GB (✅ 23/07 — PL-E2).
+- [x] **GATE 2** có kết luận rõ: ✅ 23/07 — pixel-goal + latent bật được qua cơ chế look-down 2 nhịp (cell E2); PL-E1 đóng.
+- [x] **GATE 3**: ✅ 23/07 — S1 chạy trên 101 frame latent, `s1_actions` ∈ {1,2,3}, `s1_traj`
+      (33, 2) không NaN, `predict_size=32` (PL-E3). ⬜ riêng bản in depth-range chưa lưu lại.
+- [ ] `results.json` ✅ (128 frame, 3 ep — bản sao tại `docs/handbook/results.json`); ⬜ còn
+      `summary.json` (G4) + ≥3 ảnh visualize (G3).
 - [ ] Ghi chú giới hạn trong notebook: open-loop ≠ benchmark SR/SPL; S1 không có GT trong `vln_ce`; 1 setting camera.
 
 ## §5. Ngân sách thời gian & quota (ước lượng, chưa đo ⬜)
@@ -596,11 +743,12 @@ print(f"pixel L2 (px): mean={np.mean(l2s):.1f}  n={len(l2s)}" if l2s else "khong
 | 2 | Tokenizer convert fail (R1) | lỗi ở `AutoTokenizer(..., use_fast=True)` | fallback chép `tokenizer.json` từ mirror wo-dagger sau khi so `added_tokens.json` (Phase D4) |
 | 3 | S1 không nạp dù config đúng | GATE 1 (1) fail | soi log MISSING/UNEXPECTED; đối chiếu PL-C2; báo nhóm — phát hiện mới |
 | 4 | OOM khi generate | kernel chết im (swap=0 — PL-A1) | giảm `num_history` 8→4; `empty_cache()` mỗi 8 frame; phương án cuối: 4-bit (đổi chất lượng) hoặc server ≥24GB |
-| 5 | S2 không bật pixel-goal (R4) | GATE 2 toàn action | quy trình E3; kết luận trung thực + cập nhật PL-E1 |
+| 5 | ✅ **đã gặp & hoá giải:** S2 không bật pixel-goal (R4) | GATE 2 toàn `action [5]` (llm ra `↓`) | Cơ chế look-down 2 nhịp — gọi lại `s2_step` với `look_down=True` (cell E2); nếu pass 2 vẫn `↓` → quy trình E3 |
 | 6 | Device/dtype mismatch S1 (R3) | RuntimeError trong `generate_traj` | `.to(navdp_dev)` cho latent/inputs; thử bf16; ghi lại tổ hợp chạy được |
 | 7 | Submodule diffusion-policy rỗng (R6) | ImportError `diffusion_policy` | pip git pin (C3) |
 | 8 | Pattern tên PNG khác dự đoán | FileNotFoundError trong `load_frame` | `os.listdir` in 5 tên đầu, sửa f-string — đã đánh dấu ⬜ ở E1 |
 | 9 | Tràn 20GB working ở Phase A | Errno 28 | HF_HOME đã trỏ `/kaggle/temp` (A2); không giải nén gì thêm vào working |
+| 10 | ✅ **đã gặp:** thiếu `checkpoints/depth_anything_v2_vits.pth` (hardcode trong `navdp_backbone.py:109`) | `FileNotFoundError` ngay khi dựng policy ở D3 | Bước C5: tải từ `depth-anything/Depth-Anything-V2-Small` + `os.chdir("/kaggle/working")`; weights bị checkpoint ghi đè nên không ảnh hưởng kết quả (PL-C7) |
 
 ## §7. Sau khi xong — cập nhật tài liệu
 
