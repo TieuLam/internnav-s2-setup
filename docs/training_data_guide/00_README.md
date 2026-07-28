@@ -1,56 +1,96 @@
-# 00 — README: Hướng dẫn tạo dữ liệu huấn luyện cho InternVLA-N1 (bản cho người mới)
+# Bộ tài liệu: Dữ liệu & huấn luyện InternVLA-N1 (bản dành cho người mới học ML)
 
-> **Bộ tài liệu này để làm gì:** giải thích **từ đầu, cho người chưa biết gì về robot và AI**, rằng
-> muốn *huấn luyện* (train) mô hình điều hướng InternVLA-N1 thì cần **loại dữ liệu nào**, dữ liệu đó
-> **có cấu trúc ra sao**, và **thu thập ở đâu / bằng thiết bị gì** (từ simulator, camera chuyên dụng,
-> cho tới camera điện thoại hoặc camera gắn trên robot dùng ROS2).
+> **Bộ tài liệu này trả lời trọn vẹn 6 câu hỏi:**
+> 1. Các thuật ngữ trong dự án nghĩa là gì? → [01](01_thuat_ngu.md)
+> 2. Hệ thống InternVLA-N1 hoạt động ra sao, gồm những mảnh nào? → [02](02_he_thong.md)
+> 3. Code huấn luyện **nhánh System 2** chạy thế nào, từng phần làm gì? → [03](03_code_train_s2.md)
+> 4. Data train **System 2** có cấu trúc gì, **cái nào bắt buộc / không bắt buộc**? → [04](04_data_train_s2.md)
+> 5. Data train **System 1** có cấu trúc gì, **cái nào bắt buộc / không bắt buộc**? → [05](05_data_train_s1.md)
+> 6. Làm sao **sinh data S2 từ file `.mcap`** của robot? → [06](06_pipeline_mcap_to_s2.md)
 >
-> Đây là bản "giải thích chậm" song song với bộ [handbook](../handbook/) (bản kỹ thuật cô đọng cho
-> người đã quen việc). Mọi thứ trong tài liệu này đều **đối chiếu với code thật** trong repo
-> (`internnav/dataset/*.py`, `scripts/train/...`), không phải chép từ mô tả trên mạng.
+> Mọi khẳng định đều **đối chiếu code thật** trong `InternNav/code/` (kèm `file:line` để tự kiểm
+> chứng) và **đo thật** trên dữ liệu có sẵn tại `InternNav/data/vln_ce/traj_data/r2r/17DRP5sb8fy`.
+> Chỗ nào là suy luận/đề xuất sẽ được nói rõ là suy luận/đề xuất.
 
 ---
 
-## Ai nên đọc và đọc theo thứ tự nào
+## Mục lục
 
-Bạn **mới bắt đầu** → đọc lần lượt từ 01 đến 06. Mỗi file dựa trên file trước.
-
-| File | Nội dung | Trả lời câu hỏi |
+| File | Nội dung | Dành cho lúc bạn muốn… |
 |---|---|---|
-| [01_nhap_mon_thuat_ngu](01_nhap_mon_thuat_ngu.md) | Từ điển khái niệm AI + robot cơ bản | "Train, model, RGB-D, pose, point cloud… là gì?" |
-| [02_hai_he_thong](02_hai_he_thong.md) | Vì sao N1 có **2 bộ não** và mỗi bộ ăn data khác nhau | "Tại sao không có *một* loại data?" |
-| [03_data_cho_system2](03_data_cho_system2.md) | Data cho **System 2** (bộ não "suy nghĩ") | "S2 cần gì, cấu trúc thế nào?" |
-| [04_data_cho_system1](04_data_cho_system1.md) | Data cho **System 1** (bộ não "phản xạ") | "S1 cần gì, cấu trúc thế nào?" |
-| [05_thu_thap_data](05_thu_thap_data.md) | Thu thập bằng simulator / camera chuyên dụng / điện thoại / ROS2 | "Tôi lấy data này ở đâu, bằng thiết bị nào?" |
-| [06_lo_trinh_bat_dau](06_lo_trinh_bat_dau.md) | Nên làm gì trước, làm gì sau; các bẫy thường gặp | "Bắt đầu từ đâu cho đỡ sa lầy?" |
+| [01_thuat_ngu](01_thuat_ngu.md) | Từ điển: ML, camera & hình học 3D, robot/ROS, định dạng file | …tra một từ lạ |
+| [02_he_thong](02_he_thong.md) | Hai bộ não, 3 bộ data con, model nào–config nào–script nào | …hiểu bức tranh lớn |
+| [03_code_train_s2](03_code_train_s2.md) | **Mổ xẻ code nhánh train S2**: trainer → argument → dataset → collator | …đọc/sửa code |
+| [04_data_train_s2](04_data_train_s2.md) | Cấu trúc data S2 + **bảng bắt buộc/không bắt buộc** | …chuẩn bị data S2 |
+| [05_data_train_s1](05_data_train_s1.md) | Cấu trúc data S1 + **bảng bắt buộc/không bắt buộc** | …chuẩn bị data S1 |
+| [06_pipeline_mcap_to_s2](06_pipeline_mcap_to_s2.md) | **`.mcap` → data S2**, 6 giai đoạn, có code chạy được | …bắt tay làm data thật |
+| [07_phu_luc_lerobot_format](07_phu_luc_lerobot_format.md) | Phụ lục: `chunk`, `parquet`, 4 file `meta/` — giải nghĩa từng trường | …hiểu file vật lý |
+| [08_phu_luc_thu_thap_data](08_phu_luc_thu_thap_data.md) | Phụ lục: thu data bằng simulator / RGB-D / điện thoại, lộ trình, bẫy | …chọn thiết bị & lộ trình |
 
----
+**Công cụ kèm theo** (thư mục [tools/](tools/)):
 
-## Tóm tắt 30 giây (đọc xong sẽ hiểu vì sao)
-
-InternVLA-N1 là robot điều hướng **nghe lệnh bằng lời** (kiểu *"đi tới cửa nhà thờ rồi dừng giữa
-các bậc thang"*) rồi tự đi tới đích. Nó có **2 bộ não**:
-
-- **System 2** — bộ não *chậm mà khôn*: nhìn ảnh + đọc câu lệnh → chỉ ra **một điểm trên ảnh** cần
-  đi tới (gọi là *pixel goal*).
-- **System 1** — bộ não *nhanh mà bản năng*: nhận điểm đích đó → vẽ ra **đường đi cong liên tục**
-  để né bàn ghế, tường.
-
-Muốn *dạy* (train) 2 bộ não này, bạn cần **2 bộ dữ liệu khác nhau**:
-
-| | System 2 | System 1 |
+| Script | Việc nó làm | Đã chạy thử? |
 |---|---|---|
-| Bộ dữ liệu gốc | `vln_ce` | `vln_n1` |
-| Cốt lõi phải có | ảnh + câu lệnh + **điểm đích trên ảnh** | ảnh + **đường đi thật (quỹ đạo)** + **bản đồ 3D vật cản** |
-| Cần người chú thích? | Có (viết câu lệnh) | Không (tự suy từ đường đi) |
-
-Chi tiết từng thứ nằm ở các file sau. Bắt đầu với [01_nhap_mon_thuat_ngu](01_nhap_mon_thuat_ngu.md).
+| [tools/generate_s2_mcap.py](tools/generate_s2_mcap.py) | Sinh một file `.mcap` **chứa đủ dữ liệu để dựng data S2** (2 luồng RGB + depth + camera_info + pose + câu lệnh) | ✅ 78 frame, 3.8 MB |
+| [tools/mcap2s2.py](tools/mcap2s2.py) | Chuyển `.mcap` → dataset LeRobot đúng chuẩn `vln_ce` | ✅ sinh 2 episode, **loader thật đọc được** |
 
 ---
 
-## Liên kết tới tài liệu kỹ thuật gốc (khi bạn đã vững)
+## Tóm tắt 60 giây
 
-- [../handbook/03_data_contract.md](../handbook/03_data_contract.md) — hợp đồng dữ liệu (bản đo thật).
-- [../handbook/02_code_structure.md](../handbook/02_code_structure.md) — cấu trúc code, chữ ký hàm.
-- Code loader thật: `internnav/dataset/internvla_n1_lerobot_dataset.py` (S2),
-  `internnav/dataset/navdp_lerobot_dataset.py` (S1).
+InternVLA-N1 là mô hình điều hướng **nghe lệnh bằng lời** rồi tự đi tới đích. Nó có **hai bộ não**:
+
+```
+Câu lệnh: "đi dọc hành lang, rẽ phải ở cây cột xanh, dừng cạnh cột vàng"
+        │
+        ▼
+┌──────────────────────────┐   nhìn ảnh + đọc lệnh
+│  SYSTEM 2 — "nghĩ chậm"  │ → chấm MỘT ĐIỂM trên ảnh (pixel goal)
+│  Qwen2.5-VL 7B (VLM)     │ → hoặc xuất ←/→ (xoay) hoặc STOP
+└──────────────────────────┘ → kèm một "gói tín hiệu" (latent) cho S1
+        │
+        ▼
+┌──────────────────────────┐   nhận điểm đích + ảnh + depth
+│  SYSTEM 1 — "phản xạ"    │ → vẽ ĐƯỜNG ĐI cong né vật cản
+│  NextDiT / NavDP         │ → ra lệnh bánh xe
+└──────────────────────────┘
+        │
+        ▼   robot đi → chụp ảnh mới → lặp lại
+```
+
+Hai bộ não **học hai bài toán khác nhau** nên ăn **hai loại data khác nhau**:
+
+| | **System 2** | **System 1** |
+|---|---|---|
+| Bộ data gốc | `vln_ce` | `vln_n1` |
+| Nhãn cốt lõi | **pixel goal `[u,v]`** + action rời rạc | **quỹ đạo camera** (ma trận 4×4/frame) |
+| Người phải chú thích? | ✅ Có — viết câu lệnh tiếng Anh | ❌ Không — tự suy từ quỹ đạo |
+| Thứ khó kiếm nhất | câu lệnh + biết đích ở pixel nào | **bản đồ 3D vật cản** (`pointcloud.ply`) |
+| Thu bằng thiết bị thường? | ✅ Khả thi | ❌ Khó |
+
+👉 **Kết luận thực dụng:** nếu bạn có log robot (`.mcap`) thu ngoài đời thật, hãy **làm data System 2
+trước** — nó khả thi, và là phần "thông minh" nhất của hệ. Đường đi cụ thể: [06](06_pipeline_mcap_to_s2.md).
+
+---
+
+## Ba sự thật hay bị hiểu nhầm nhất
+
+1. **Không có "một dataset của InternVLA-N1".** Có **3 bộ con** (`vln_ce`, `vln_n1`, `vln_pe`) nuôi
+   **3 model khác nhau**, mỗi bộ có một loader riêng và **không thay thế được cho nhau**
+   ([02](02_he_thong.md) mục 3).
+2. **Không bao giờ "train từ đầu".** Cả hai script train đều nạp trọng số có sẵn bằng
+   `from_pretrained(...)` — luôn là **fine-tune** ([03](03_code_train_s2.md) mục 7).
+3. **Chữ "action" có hai nghĩa.** Với S2 là **số nguyên** `{0,1,2,3,5}`; với S1 là **ma trận 4×4**
+   (quỹ đạo liên tục). Cùng tên, khác hẳn nhau ([02](02_he_thong.md) mục 5).
+
+---
+
+## Liên kết tới tài liệu kỹ thuật khác trong repo
+
+- [../handbook/03_data_contract.md](../handbook/03_data_contract.md) — hợp đồng dữ liệu (bản đo thật, cô đọng).
+- [../handbook/02_code_structure.md](../handbook/02_code_structure.md) — cấu trúc code + chữ ký hàm phía inference.
+- [../io_system2.md](../io_system2.md) — vào/ra của System 2 lúc chạy thật.
+- Code loader thật: `InternNav/code/internnav/dataset/internvla_n1_lerobot_dataset.py` (S2),
+  `.../navdp_lerobot_dataset.py` (S1).
+
+*Bộ tài liệu mô tả code tại thời điểm phân tích (27/07/2026). Nếu code đổi, hãy kiểm lại các `file:line` được trích.*
