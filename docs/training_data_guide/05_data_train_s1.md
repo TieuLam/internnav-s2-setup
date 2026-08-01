@@ -7,7 +7,9 @@
 > (có sẵn trong `InternNav/data/`), đối chiếu code
 > [navdp_lerobot_dataset.py](../../../code/internnav/dataset/navdp_lerobot_dataset.py) và config
 > [scripts/train/base_train/configs/navdp.py](../../../code/scripts/train/base_train/configs/navdp.py).
-> Bộ tài liệu: [04_data_train_s2](04_data_train_s2.md) · [02_he_thong](02_he_thong.md)
+> Bộ tài liệu: [03b_code_train_s1](03b_code_train_s1.md) (mổ xẻ code train S1) ·
+> [06b_pipeline_mcap_to_s1](06b_pipeline_mcap_to_s1.md) (tự sinh data S1) ·
+> [04_data_train_s2](04_data_train_s2.md) · [02_he_thong](02_he_thong.md)
 
 ---
 
@@ -100,9 +102,16 @@ camera_extrinsic (frame gốc) — vị trí (0, 0, 0.357)      → camera cao 3
 action[0] — vị trí (-4.724, -6.543, 0.357)
 ```
 
-**Quy ước trục của `vln_n1` KHÁC `vln_ce`** (giải mã từ ma trận đo thật): cột 1 = "phải", cột 2 =
-**"lên"**, cột 3 = "trước" → tức **x-phải, y-LÊN, z-trước**; trong khi `vln_ce` dùng **OpenCV**
-(x-phải, y-**xuống**, z-trước). → **Đừng bao giờ bê nguyên pose từ hệ này sang hệ kia.**
+**Quy ước trục của `vln_n1` KHÁC `vln_ce`** (giải mã từ ma trận đo thật): cột 1 = **"phải"**,
+cột 2 = **"lên"**, cột 3 = **"LÙI"** → tức **x-phải, y-lên, z-lùi**, camera nhìn theo **−z**
+(quy ước kiểu OpenGL/Blender); trong khi `vln_ce` dùng **OpenCV** (x-phải, y-**xuống**, z-**trước**).
+Hai hệ lệch nhau **180° quanh trục x**. → **Đừng bao giờ bê nguyên pose từ hệ này sang hệ kia.**
+
+> ✅ **Cách kiểm chứng** (đã chạy trên 78 frame của episode 0): tích vô hướng giữa vector di chuyển
+> và **cột 3** của `action` bằng **−1.000** (chứ không phải +1) → cột 3 chỉ ra **sau**; tích vô hướng
+> với cột 1 bằng 0.007 → cột 1 vuông góc hướng đi. Cột 2 luôn đúng bằng `(0,0,1)` ở mọi frame →
+> **camera không có góc cúi**. Cách dựng lại ma trận này khi tự tạo data:
+> [06b](06b_pipeline_mcap_to_s1.md) mục 5.1.
 
 ---
 
@@ -241,7 +250,7 @@ epochs = 1000 ; batch_size = 32 ; lr = 1e-4
 ```
 
 Chạy bằng `bash scripts/train/base_train/start_train.sh --name <tên> --model navdp` (8 GPU,
-qua `torchrun`).
+qua `torchrun`). Giải thích từng chặng của lần chạy đó: [03b_code_train_s1](03b_code_train_s1.md).
 
 > ⚠️ Loader S1 cần thêm thư viện **`open3d`** và **`jsonlines`** (không có trong môi trường tối
 > thiểu). Loader S2 thì không cần.
@@ -271,4 +280,6 @@ Ngoài đời thật, nút thắt là bản đồ vật cản — nhưng như m�
 
 ---
 
-Tiếp theo: bắt tay làm data S2 thật từ log robot → [06_pipeline_mcap_to_s2](06_pipeline_mcap_to_s2.md).
+Tiếp theo: mổ xẻ code nhánh train S1 → [03b_code_train_s1](03b_code_train_s1.md);
+tự sinh data S1 từ log robot → [06b_pipeline_mcap_to_s1](06b_pipeline_mcap_to_s1.md);
+làm data S2 → [06_pipeline_mcap_to_s2](06_pipeline_mcap_to_s2.md).

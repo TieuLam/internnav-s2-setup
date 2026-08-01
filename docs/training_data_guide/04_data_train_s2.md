@@ -7,6 +7,9 @@
 > Mọi con số **đo thật** trên `InternNav/data/vln_ce/traj_data/r2r/17DRP5sb8fy` và đối chiếu code
 > [internvla_n1_lerobot_dataset.py](../../../code/internnav/dataset/internvla_n1_lerobot_dataset.py).
 > Bộ tài liệu: [03_code_train_s2](03_code_train_s2.md) · [05_data_train_s1](05_data_train_s1.md)
+>
+> 📌 Bộ `vln_ce` trên HF còn một thư mục **`raw_data/`** nữa (JSON "đề bài", **không** dùng để train
+> S2) — xem [10_phu_luc_raw_data_vln_ce](10_phu_luc_raw_data_vln_ce.md).
 
 ---
 

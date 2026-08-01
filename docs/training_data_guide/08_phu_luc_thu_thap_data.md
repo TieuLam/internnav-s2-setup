@@ -152,13 +152,17 @@ khớp cấu hình lúc robot chạy thật** ([02](02_he_thong.md) mục 8.3).
    `df.dtypes` và vài hàng đầu → **đối chiếu bảng cột ở [04](04_data_train_s2.md)**.
 3. Mục tiêu: "sờ" được dữ liệu thật, thấy đúng như mô tả.
 
-### Mức 1 — Chạy thử pipeline trên dữ liệu mô phỏng (nửa ngày)
+### Mức 1 — Chạy thử pipeline trên bag ROS 2 có sẵn trong repo (nửa ngày)
 ```bash
 cd docs/training_data_guide/tools
-python generate_s2_mcap.py --out demo_s2_robot.mcap
-python mcap2s2.py --mcap demo_s2_robot.mcap --out ./traj_data --dataset-name myrobot --scene-id demo_scene
+python db32s2.py --bag vslam_nav_test_bag_2026_07_29-13_59_45_10s_20s --inspect
+python db32s2.py --bag vslam_nav_test_bag_2026_07_29-13_59_45_10s_20s \
+    --out ./traj_data --dataset-name vinbot --scene-id lab_run01 \
+    --min-move 0.15 --subgoal-dist 1.0 \
+    --instruction "Walk straight along the white walkway past the workbenches and stop at the end of the aisle."
 ```
-→ Hiểu trọn vòng đời dữ liệu **trước khi** đụng vào log thật. Chi tiết: [06](06_pipeline_mcap_to_s2.md).
+→ Hiểu trọn vòng đời dữ liệu **trước khi** thu log mới. Chi tiết: [06c](06c_pipeline_db3_to_s2.md)
+(bản `.mcap`: [06](06_pipeline_mcap_to_s2.md)).
 
 ### Mức 2 — Data S2 quy mô nhỏ từ thiết bị thật (1–2 tuần)
 1. Quay 5–10 lượt đi ngắn (điện thoại có ARKit/ARCore, hoặc robot ROS 2 ghi `.mcap`).

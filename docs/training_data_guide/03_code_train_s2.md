@@ -456,3 +456,4 @@ dựng module S1 → trọng số khớp sạch.
 
 Tiếp theo: cấu trúc chi tiết của data S2 và **cái gì bắt buộc / không bắt buộc** →
 [04_data_train_s2](04_data_train_s2.md).
+Bản song song cho nhánh System 1 → [03b_code_train_s1](03b_code_train_s1.md).

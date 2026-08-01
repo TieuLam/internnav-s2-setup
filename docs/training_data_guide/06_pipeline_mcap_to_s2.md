@@ -11,16 +11,17 @@
 
 ## 0. Kết luận phải nắm trước khi làm gì cả
 
-### 0.1. File `MCAP/demo_robot.mcap` hiện có **không đủ**
+### 0.1. Một log "chỉ có pose/imu" là **không đủ**
 
-Nó chỉ là bài tập làm quen định dạng — 4 topic `pose / imu / battery / log`, **không có thị giác**:
+Đây là bẫy đầu tiên: nhiều bản ghi robot chỉ có các topic điều khiển/cảm biến quán tính
+(`pose / imu / battery / log`) — **không có thị giác**. Với loại log đó thì **không thể** sinh data S2:
 
-| Thứ S2 bắt buộc cần | `demo_robot.mcap` có? |
+| Thứ S2 bắt buộc cần | Log chỉ-có-pose/imu |
 |---|---|
 | Ảnh RGB theo thời gian | ❌ |
 | Ảnh Depth | ❌ |
 | Intrinsics camera (`fx, fy, cx, cy`) | ❌ — **không có thì không chiếu được pixel-goal** |
-| Pose/quỹ đạo robot | ✅ (`/robot/pose`) |
+| Pose/quỹ đạo robot | ✅ |
 | Câu lệnh ngôn ngữ | ❌ |
 
 ### 0.2. Một `.mcap` "đủ dùng" cho S2 phải có 5 luồng
@@ -34,20 +35,20 @@ Nó chỉ là bài tập làm quen định dạng — 4 topic `pose / imu / batt
 | **Pose/TF theo thời gian** | `action`, `pose.{setting}`, waypoint 3D | ✅ |
 | **Câu lệnh + ranh giới episode** | `meta/episodes.jsonl` | ✅ (log robot thường **không** có → phải bổ sung ngoài) |
 
-👉 Vì file demo thiếu gần hết, tài liệu này đi kèm **script sinh một `.mcap` mới có đủ 5 luồng**:
-[tools/generate_s2_mcap.py](tools/generate_s2_mcap.py).
+👉 Việc đầu tiên với một file `.mcap` lạ là **đối chiếu nó với bảng trên** — dùng
+[tools/mcap_inspect.py](tools/mcap_inspect.py) (mục 2).
+
+> 📌 **Nếu log robot của bạn là `.db3` (rosbag2)** — định dạng mà `ros2 bag record` sinh ra theo mặc
+> định — hãy dùng [06c_pipeline_db3_to_s2](06c_pipeline_db3_to_s2.md) + [tools/db32s2.py](tools/db32s2.py)
+> thay cho tài liệu này. Ý tưởng 6 giai đoạn giống nhau; khác ở tầng đọc file (SQLite + CDR) và ở chỗ
+> hình học camera phải suy từ cây TF.
 
 ---
 
 ## 1. Toàn cảnh đường ống
 
 ```
-      ┌──────────────────────────┐
-      │ tools/generate_s2_mcap.py │  (khi chưa có log thật — sinh dữ liệu mô phỏng ĐỦ 5 luồng)
-      └──────────────────────────┘
-                   │
-                   ▼
-            demo_s2_robot.mcap  ─── hoặc ───  log robot thật (ROS 2 → mcap)
+            log robot thật  (ROS 2 → .mcap)
                    │
                    ▼   tools/mcap2s2.py
    ┌───────────────────────────────────────────────────────────────┐
@@ -68,52 +69,39 @@ Nó chỉ là bài tập làm quen định dạng — 4 topic `pose / imu / batt
 
 ---
 
-## 2. Bước 1 — Sinh file `.mcap` có đủ dữ liệu
+## 2. Bước 1 — Khảo sát file `.mcap` đầu vào
 
-### 2.1. Script làm gì
+### 2.1. Chạy `mcap_inspect.py`
 
-[tools/generate_s2_mcap.py](tools/generate_s2_mcap.py) dựng một **"simulator tí hon"**: một căn phòng
-hình hộp có sàn kẻ ô, thảm đỏ, 4 bức tường và 4 cây cột màu. Với mỗi frame nó **ray-trace** ra ảnh RGB
-và ảnh depth **đúng theo pose camera** — nhờ vậy ảnh, depth và pose **khớp nhau về hình học**, điều
-kiện bắt buộc để bước chiếu pixel-goal cho kết quả đúng.
-
-Tám topic được ghi ra:
-
-| Topic | Schema | Tần số | Vai trò |
-|---|---|---|---|
-| `/camera/front/image_raw` | `foxglove.CompressedImage` (jpeg) | 10 Hz | RGB `pitch_1` |
-| `/camera/lookdown/image_raw` | `foxglove.CompressedImage` (jpeg) | 10 Hz | RGB `pitch_2` |
-| `/camera/lookdown/depth` | `foxglove.CompressedImage` (png 16-bit) | 10 Hz | Depth **milimét** |
-| `/camera/front/camera_info` | `foxglove.CameraCalibration` | 1 Hz | `K` |
-| `/camera/lookdown/camera_info` | `foxglove.CameraCalibration` | 1 Hz | `K` |
-| `/robot/pose` | `foxglove.PoseInFrame` | **50 Hz** | quỹ đạo (phát dày hơn ảnh → buộc pipeline phải đồng bộ thật) |
-| `/task/episode` | `vlnbot.EpisodeMarker` | mỗi episode 2 msg | câu lệnh + ranh giới `start`/`end` |
-| `/robot/camera_mount` | `vlnbot.CameraMount` | 1 lần | chiều cao + góc cúi từng camera |
-
-Cộng thêm **metadata `s2_profile`** ghi sẵn `height_cm / pitch_1 / pitch_2 / setting / kích thước ảnh
-/ đơn vị depth / quy ước hệ toạ độ` — để `mcap2s2.py` không phải đoán.
-
-> 💡 Vì sao dùng schema JSON của **Foxglove** chứ không phải ROS 2? Vì file **tự mô tả**: mở được bằng
-> Foxglove Studio và đọc được bằng thư viện `mcap` thuần Python, **không cần cài ROS**. Với log robot
-> thật (mã hoá `cdr`), chỉ cần thay bộ giải mã — xem mục 7.
-
-### 2.2. Quỹ đạo được sinh thế nào
-
-Mỗi episode là một chuỗi lệnh rời rạc **đúng kiểu R2R**: `('F', n)` = tiến `n` bước × **0.25 m**,
-`('L'/'R', deg)` = xoay từng nấc **15°**. Mỗi bước = một frame.
-
-```python
-DEFAULT_EPISODES = [
-    Episode(instruction="Walk straight down the hallway past the red pillar, turn right ...",
-            start=(0.0, 0.0, 0.0),
-            route=[("F",10), ("R",45), ("F",6), ("L",45), ("F",10), ("R",30), ("F",5)]),
-    ...
-]
+```bash
+pip install mcap
+cd docs/training_data_guide/tools
+python mcap_inspect.py --mcap log_robot.mcap
 ```
 
-Muốn thêm lộ trình/câu lệnh → sửa danh sách này.
+Nó trả lời đúng ba câu hỏi bạn cần trước khi viết bất cứ dòng code nào: **có topic gì · message type
+gì · mã hoá kiểu gì**, kèm nhịp (Hz) từng topic và cây field của từng schema. Không giải mã nội dung
+nên chạy trong vài mili giây kể cả file 10 GB (thêm `--deep` nếu muốn nhịp và cỡ byte chính xác).
+
+### 2.2. Đối chiếu với 6 luồng bắt buộc
+
+Lấy bảng ở mục 0.2 làm danh sách kiểm. Với mỗi luồng, ghi lại **tên topic** và **nhịp**:
+
+| Luồng | Topic của bạn | Nhịp | Ghi chú khi thiếu |
+|---|---|---|---|
+| RGB `pitch_1` | | | thiếu là **không train được** |
+| RGB `pitch_2` | | | dùng chung `pitch_1` nếu robot 1 camera (mục 7.4) |
+| Depth ở `pitch_2` | | | không có sensor → mục 7.3 |
+| `camera_info` (`K`) | | | thiếu là **không chiếu được pixel-goal** |
+| Pose / TF | | | |
+| Câu lệnh + ranh giới episode | | | log robot hầu như luôn thiếu → `--instruction-file` |
+
+Ba thứ nữa cần chốt ngay ở bước này, vì chúng quyết định **tên thư mục** của dataset:
+**chiều cao camera (cm)**, **góc cúi `pitch_1`**, **góc cúi `pitch_2`**.
 
 ### 2.3. Quy ước hình học (bám sát data gốc)
+
+Đây là công thức mà `mcap2s2.py` dùng để dựng cột `pose.{setting}` từ `(x, y, yaw)` của robot:
 
 ```python
 def camera_pose_from_base(x, y, yaw, height_m, pitch_deg):
@@ -126,30 +114,11 @@ def camera_pose_from_base(x, y, yaw, height_m, pitch_deg):
 Kiểm chứng: với `h=0.6, p=30°, yaw=0` công thức cho ra **đúng** ma trận đo thật trong `vln_ce`
 ([04](04_data_train_s2.md) mục 5.1).
 
-### 2.4. Chạy
+### 2.4. Nếu chưa có log thật để thử
 
-```bash
-pip install mcap numpy pillow
-cd docs/training_data_guide/tools
-python generate_s2_mcap.py --out demo_s2_robot.mcap
-```
-
-**Kết quả thật:**
-
-```
-Đang render 2 episode ở 640×480 ...
-  episode 0: 40 frames — "Walk straight down the hallway past the red pillar, turn rig..."
-  episode 1: 38 frames — "Turn left and walk along the red carpet until you reach the ..."
-✅ Đã tạo demo_s2_robot.mcap — 78 frame ảnh, 3.8 MB, setting = 125cm_30deg
-```
-
-Đổi cấu hình camera (ví dụ sang cấu hình **1 camera** `60cm_30_30`):
-
-```bash
-python generate_s2_mcap.py --height-cm 60 --pitch1 30 --pitch2 30 --out demo_1cam.mcap
-```
-
-Xem lại file: `python generate_s2_mcap.py --inspect demo_s2_robot.mcap`
+Cách gọn nhất để chạy trọn vòng đời dữ liệu là dùng **bag ROS 2 thật có sẵn trong repo**:
+[06c_pipeline_db3_to_s2](06c_pipeline_db3_to_s2.md) — đầy đủ ảnh 2 camera, `camera_info`, odometry,
+point cloud, và đã được chạy thử end-to-end.
 
 ---
 
@@ -157,11 +126,14 @@ Xem lại file: `python generate_s2_mcap.py --inspect demo_s2_robot.mcap`
 
 ```bash
 pip install mcap numpy pillow pyarrow
-python mcap2s2.py --mcap demo_s2_robot.mcap --out ./traj_data \
+python mcap2s2.py --mcap log_robot.mcap --out ./traj_data \
                   --dataset-name myrobot --scene-id demo_scene
 ```
 
 Dưới đây là **từng giai đoạn** của [tools/mcap2s2.py](tools/mcap2s2.py).
+
+> 📖 Cần mức chi tiết hơn — **từng hàm một** (nhận gì, trả gì, vì sao viết thế, sửa ở đâu khi dùng
+> mcap robot thật)? Xem [09_giai_thich_ham_mcap2s2](09_giai_thich_ham_mcap2s2.md).
 
 ### Giai đoạn A — `read_mcap()`: đọc log
 
@@ -392,12 +364,16 @@ Rồi chạy vài chục step trên 1 GPU để xem loss có hữu hạn và gi�
 cd InternNav/internnav-s2-setup/docs/training_data_guide/tools
 pip install mcap numpy pillow pyarrow
 
-python generate_s2_mcap.py --out demo_s2_robot.mcap
-python mcap2s2.py --mcap demo_s2_robot.mcap --out ./traj_data \
-                  --dataset-name myrobot --scene-id demo_scene
+python mcap_inspect.py --mcap log_robot.mcap            # bước 1: khảo sát, đối chiếu mục 2.2
+python mcap2s2.py --mcap log_robot.mcap --out ./traj_data \
+                  --dataset-name myrobot --scene-id run01 \
+                  --instruction-file instructions.json
 ```
 
-Sau ~40 giây bạn có một dataset S2 hoàn chỉnh, **đã được loader thật xác nhận đọc được**.
+Rồi kiểm định bằng loader thật (mục 4) trước khi tin dataset.
+
+> 💡 Muốn chạy thử ngay trên dữ liệu có sẵn trong repo (bag ROS 2 thật, đã kiểm định end-to-end):
+> [06c_pipeline_db3_to_s2](06c_pipeline_db3_to_s2.md) mục 10.
 
 ---
 
@@ -489,5 +465,7 @@ Nhớ gắn camera **chúc xuống** đủ để thấy sàn phía trước, n�
   kiểm soát được dtype.
 
 ---
+
+Bản song song cho System 1 (`.mcap` → `vln_n1`): [06b_pipeline_mcap_to_s1](06b_pipeline_mcap_to_s1.md).
 
 *Quay lại mục lục: [00_README](00_README.md).*

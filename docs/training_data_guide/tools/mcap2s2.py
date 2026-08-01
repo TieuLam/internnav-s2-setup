@@ -4,7 +4,7 @@ mcap2s2.py — Chuyển một file `.mcap` thành data train System 2 (định d
 =============================================================================
 ĐẦU VÀO → ĐẦU RA
 -----------------------------------------------------------------------------
-    demo_s2_robot.mcap                (sinh bởi `generate_s2_mcap.py`, hoặc log robot thật)
+    demo_s2_robot.mcap                (log robot thật)
               │
               ▼
     traj_data/<dataset>/<scene_id>/
@@ -40,15 +40,6 @@ Với mcap của robot thật, chỉ cần khai lại tên topic:
         --topic-pose      /odom  --topic-caminfo /camera_down/color/camera_info \
         --height-cm 125 --pitch1 0 --pitch2 30 --instruction-file instructions.json
 
-=============================================================================
-BA ĐIỀU DỄ SAI NHẤT (đọc trước khi sửa code)
------------------------------------------------------------------------------
- 1. `setting = f"{height}cm_{pitch_2}deg"` — dùng **pitch_2** (góc CÚI), không phải pitch_1.
-    Sai tên cột → loader không thấy dữ liệu → bỏ nguyên scene → dataset rỗng.
- 2. Depth phải là **PNG uint16 đơn vị milimét** (loader chia 1000).
- 3. `pose.{setting}` là ma trận **camera → world**, camera theo quy ước OpenCV
-    (x phải, y xuống, z trục quang). Sai quy ước → nhãn quỹ đạo của dual-system sai
-    mà KHÔNG có thông báo lỗi nào.
 """
 
 from __future__ import annotations
